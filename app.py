@@ -78,6 +78,57 @@ def load_data():
             "優先度", "進捗", "期限", "完了日", "備考"
         ])
 
+def set_validation_rules(sheet):
+    """スプレッドシートのH列(優先度)とI列(進捗)にプルダウンを設定する"""
+    # H列はインデックス7, I列はインデックス8 (0始まり)
+    # 行は2行目(index 1)から1000行目まで
+    
+    requests = [
+        # 1. 優先度 (H列) のプルダウン設定
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 1000,
+                    "startColumnIndex": 7, # H列
+                    "endColumnIndex": 8
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": v} for v in PRIORITY_OPTIONS]
+                    },
+                    "showCustomUi": True,
+                    "strict": True
+                }
+            }
+        },
+        # 2. 進捗 (I列) のプルダウン設定
+        {
+            "setDataValidation": {
+                "range": {
+                    "sheetId": sheet.id,
+                    "startRowIndex": 1,
+                    "endRowIndex": 1000,
+                    "startColumnIndex": 8, # I列
+                    "endColumnIndex": 9
+                },
+                "rule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [{"userEnteredValue": v} for v in STATUS_OPTIONS]
+                    },
+                    "showCustomUi": True,
+                    "strict": True
+                }
+            }
+        }
+    ]
+    # APIリクエスト送信
+    sheet.batch_update({"requests": requests})
+
+
 def save_data(df):
     """Googleスプレッドシートにデータを保存する"""
     try:
@@ -97,6 +148,13 @@ def save_data(df):
         sheet.batch_clear(["A2:L1000"]) 
         if len(data_to_write) > 0:
             sheet.update(range_name=f'A2', values=data_to_write)
+        
+        # ★ここでプルダウン設定を適用する
+        try:
+            set_validation_rules(sheet)
+        except Exception as e:
+            # 万が一プルダウン設定でコケてもデータ保存は成功させるためpass
+            print(f"Validation Error: {e}")
             
         return True
 
@@ -151,22 +209,15 @@ if 'edit_index' not in st.session_state:
 # リロード時の型安全対策
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# --- 通知判定ロジック (★ここが修正箇所です) ---
+# --- 通知判定ロジック ---
 today = datetime.date.today()
 df_alert = st.session_state.tasks_df.copy()
 incomplete_mask = df_alert['進捗'] != '完了'
 
-# 【修正】日付比較のエラーを防ぐため、両方を「Timestamp型」に揃えて比較します
-# 1. データフレームの日付列をTimestamp型に変換（エラーはNaTにする）
 temp_due_dates = pd.to_datetime(df_alert['期限'], errors='coerce')
-
-# 2. 今日の日付もTimestamp型に変換
 today_timestamp = pd.Timestamp(today)
-
-# 3. 比較実行（これならエラーが出ません）
 is_expired = temp_due_dates < today_timestamp
 
-# 抽出
 alert_rows = df_alert[
     incomplete_mask & (
         is_expired | 
