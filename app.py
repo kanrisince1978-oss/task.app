@@ -11,80 +11,113 @@ from oauth2client.service_account import ServiceAccountCredentials
 # --- 定数設定 ---
 PRIORITY_OPTIONS = ["高", "中", "低"]
 STATUS_OPTIONS = ["未対応", "進行中", "完了"]
-# 共有するスプレッドシートの名前（Googleドライブ上の名前と一致させてください）
-SPREADSHEET_NAME = "タスク管理DB"
+SHEET_NAME = "task_db" # スプレッドシートのファイル名
 
-# --- データ操作関数 (Google Sheets版) ---
-
+# --- Google Sheets 認証 & 接続設定 ---
 def get_gspread_client():
-    """Secretsから認証情報を取得してGoogle Sheetsに接続する"""
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    # StreamlitのSecretsから認証情報を読み込む
-    # secrets.toml に [gcp_service_account] セクションが必要です
-    creds_dict = dict(st.secrets["gcp_service_account"])
+    # Secretsから認証情報を読み込む
+    creds_dict = st.secrets["gcp_service_account"]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     return client
 
-@st.cache_data(ttl=5)  # 5秒ごとにキャッシュをクリアして最新データを取得
+# --- データ操作関数 ---
+
 def load_data():
-    """スプレッドシートからデータをロードする"""
+    """Googleスプレッドシートからデータをロードする"""
     try:
         client = get_gspread_client()
-        sheet = client.open(SPREADSHEET_NAME).sheet1
-        data = sheet.get_all_records()
+        sheet = client.open(SHEET_NAME).sheet1 # 1枚目のシートを取得
+        data = sheet.get_all_records() # 辞書形式で取得
+        
         df = pd.DataFrame(data)
+        
+        # もしデータが空ならカラムだけ定義
+        if df.empty:
+            df = pd.DataFrame(columns=[
+                "削除", "タイトル", "詳細", "依頼者", 
+                "担当者1", "担当者2", "担当者3", 
+                "優先度", "進捗", "期限", "完了日", "備考"
+            ])
+
+        # 必要な列がなければ作成 (エラー回避)
+        required_cols = [
+            "削除", "タイトル", "詳細", "依頼者", 
+            "担当者1", "担当者2", "担当者3", 
+            "優先度", "進捗", "期限", "完了日", "備考"
+        ]
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = "" # 空文字で埋める
+
+        # 削除フラグの型変換
+        # スプレッドシートではTRUE/FALSEが文字列で返る場合があるため調整
+        df['削除'] = df['削除'].apply(lambda x: True if str(x).upper() == 'TRUE' else False)
+
+        # 日付型の変換
+        def parse_date(x):
+            if not x or str(x).strip() == "":
+                return None
+            try:
+                return pd.to_datetime(x).date()
+            except:
+                return None
+
+        df['期限'] = df['期限'].apply(parse_date)
+        df['完了日'] = df['完了日'].apply(parse_date)
+
+        # テキスト列のNaN処理
+        text_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "備考"]
+        for col in text_cols:
+            df[col] = df[col].fillna("").astype(str)
+
+        return df
+
     except Exception as e:
-        # シートが空、または見つからない場合
-        df = pd.DataFrame()
-
-    # --- 列の定義と補完 ---
-    required_cols = [
-        "削除", "タイトル", "詳細", "依頼者", 
-        "担当者1", "担当者2", "担当者3", 
-        "優先度", "進捗", "期限", "完了日", "備考"
-    ]
-    
-    for col in required_cols:
-        if col not in df.columns:
-            df[col] = None if col != "削除" else False
-
-    # 削除フラグの調整（スプレッドシートの文字型対策）
-    if '削除' in df.columns:
-        df['削除'] = df['削除'].astype(str).map(
-            {'TRUE': True, 'True': True, 'Tk': True, '1': True, '1.0': True}
-        ).fillna(False)
-
-    # 文字列型の列をクリーンアップ
-    text_columns = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "備考", "優先度", "進捗"]
-    for col in text_columns:
-        df[col] = df[col].fillna("").astype(str).replace("nan", "")
-
-    return df
+        st.error(f"スプレッドシート読み込みエラー: {e}")
+        # エラー時は空のDFを返す（アプリ停止を防ぐ）
+        return pd.DataFrame(columns=[
+            "削除", "タイトル", "詳細", "依頼者", 
+            "担当者1", "担当者2", "担当者3", 
+            "優先度", "進捗", "期限", "完了日", "備考"
+        ])
 
 def save_data(df):
-    """データフレームの中身でスプレッドシートを全上書きする"""
+    """Googleスプレッドシートにデータを保存する"""
     try:
         client = get_gspread_client()
-        sheet = client.open(SPREADSHEET_NAME).sheet1
+        sheet = client.open(SHEET_NAME).sheet1
         
-        # 保存用データフレーム作成
+        # 保存用にデータを整形（日付を文字列にするなど）
         save_df = df.copy()
         
-        # 日付列を文字列変換（JSONエラー対策）
+        # 日付を文字列に変換 (YYYY-MM-DD)
+        # これをしないとJSONシリアライズエラーになります
         for col in ['期限', '完了日']:
-            if col in save_df.columns:
-                save_df[col] = save_df[col].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) else "")
-        
-        # 削除フラグも文字列に
-        save_df['削除'] = save_df['削除'].astype(str)
+            save_df[col] = save_df[col].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
 
-        # 全データをクリアして書き込み
-        sheet.clear()
-        sheet.update([save_df.columns.values.tolist()] + save_df.values.tolist())
+        # 削除列を TRUE/FALSE の文字列やブール値にするのではなく、空文字にしておく（見た目重視）
+        # またはチェック状態を保存したい場合はそのままでOK
+        save_df['削除'] = save_df['削除'].apply(lambda x: "TRUE" if x else "FALSE")
+        
+        # データフレームをリストのリストに変換
+        # ヘッダーは書き込まず、データ部分だけを更新する
+        data_to_write = save_df.values.tolist()
+        
+        # --- 【重要】入力規則（プルダウン等）を守るための保存ロジック ---
+        # 1. 既存のデータ範囲（2行目以降）の値だけをクリアする（行削除はしない）
+        #    こうすることで、列に設定された入力規則は残ります。
+        sheet.batch_clear(["A2:L1000"]) # A列〜L列のデータエリアをクリア
+
+        # 2. 新しいデータを書き込む
+        if len(data_to_write) > 0:
+            sheet.update(range_name=f'A2', values=data_to_write)
+            
         return True
+
     except Exception as e:
-        st.error(f"保存エラー: {e}")
+        st.error(f"スプレッドシート保存エラー: {e}")
         return False
 
 def send_gmail(subject, body, to_email, from_email, app_password):
@@ -114,6 +147,7 @@ def ensure_date_columns(df):
     for col in target_cols:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
+            df[col] = df[col].apply(lambda x: x.date() if pd.notnull(x) else None)
     return df
 
 # --- UI構築 ---
@@ -133,16 +167,15 @@ if 'edit_index' not in st.session_state:
 # リロード時の型安全対策
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# --- 通知判定ロジック（修正版） ---
-today = pd.Timestamp.now().normalize()
+# --- 通知判定ロジック ---
+today = datetime.date.today()
 df_alert = st.session_state.tasks_df.copy()
 incomplete_mask = df_alert['進捗'] != '完了'
 
-# アラート対象抽出
-# 【修正】優先度が高いだけのタスクは除外し、純粋に「期限切れ」のみを対象に変更
 alert_rows = df_alert[
     incomplete_mask & (
-        df_alert['期限'] < today
+        (df_alert['期限'] < today) | 
+        ((df_alert['優先度'] == '高'))
     )
 ]
 alert_count = len(alert_rows)
@@ -150,10 +183,10 @@ alert_count = len(alert_rows)
 # --- ヘッダー & メール設定 ---
 col_title, col_alert = st.columns([1, 2])
 with col_title:
-    st.title("📝 社内タスク管理 (Cloud版)")
+    st.title("📝 社内タスク管理")
 with col_alert:
     if alert_count > 0:
-        st.markdown(f"<h3 style='color: red;'>⚠️ 期限切れタスク: {alert_count}件</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='color: red;'>⚠️ 未完了・期限切れタスク: {alert_count}件</h3>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("📧 通知設定 (Gmail)")
@@ -164,16 +197,15 @@ with st.sidebar:
     if st.button("📩 今すぐ通知を送る"):
         if alert_count > 0:
             if gmail_user and gmail_pass and target_email:
-                body = "【タスク管理アプリからの通知】\n\n以下のタスクが期限切れです。\n\n"
+                body = "【タスク管理アプリからの通知】\n\n以下のタスクが未完了、または期限切れです。\n\n"
                 for idx, row in alert_rows.iterrows():
                     assignees = f"{row.get('担当者1','') or ''} {row.get('担当者2','') or ''} {row.get('担当者3','') or ''}"
-                    deadline_str = row['期限'].strftime('%Y-%m-%d') if pd.notnull(row['期限']) else "未設定"
                     body += f"・タイトル: {row['タイトル']}\n"
-                    body += f"  期限: {deadline_str} / 担当: {assignees}\n"
+                    body += f"  期限: {row['期限']} / 担当: {assignees}\n"
                     body += f"  優先度: {row['優先度']} / 進捗: {row['進捗']}\n"
                     body += "-"*20 + "\n"
                 
-                if send_gmail("【重要】タスク期限切れ通知", body, target_email, gmail_user, gmail_pass):
+                if send_gmail("【重要】タスク未完了通知", body, target_email, gmail_user, gmail_pass):
                     st.success("メールを送信しました！")
             else:
                 st.error("メール設定を全て入力してください。")
@@ -210,11 +242,7 @@ with st.expander(f"**タスク新規登録 / {'編集' if st.session_state.editi
         
         def get_default_date(key, days_offset=0):
             val = task_to_edit.get(key)
-            if pd.notnull(val):
-                if isinstance(val, pd.Timestamp):
-                    return val.date()
-                if isinstance(val, datetime.date):
-                    return val
+            if isinstance(val, datetime.date): return val
             return datetime.date.today() + datetime.timedelta(days=days_offset)
 
         due_date = st.date_input("⑦期限", value=get_default_date("期限", 7))
@@ -229,8 +257,7 @@ with st.expander(f"**タスク新規登録 / {'編集' if st.session_state.editi
                 "削除": False, "タイトル": title, "詳細": details, "依頼者": requester, 
                 "担当者1": assignee1, "担当者2": assignee2, "担当者3": assignee3,
                 "優先度": priority, "進捗": status, 
-                "期限": pd.to_datetime(due_date), 
-                "完了日": pd.to_datetime(completion_date) if completion_date and status == "完了" else None,
+                "期限": due_date, "完了日": completion_date if completion_date and status == "完了" else None,
                 "備考": remarks
             }
             
