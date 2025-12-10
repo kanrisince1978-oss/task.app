@@ -4,7 +4,8 @@ import datetime
 import io
 import smtplib
 from email.mime.text import MIMEText
-from email.utils import formatdate
+from email.utils import formatdate, formataddr
+from email.header import Header
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -48,10 +49,8 @@ def load_data():
             if col not in df.columns:
                 df[col] = ""
 
-        # 削除フラグの変換
         df['削除'] = df['削除'].apply(lambda x: True if str(x).upper() == 'TRUE' else False)
 
-        # 日付型の変換
         def parse_date(x):
             if not x or str(x).strip() == "":
                 return None
@@ -63,7 +62,6 @@ def load_data():
         df['期限'] = df['期限'].apply(parse_date)
         df['完了日'] = df['完了日'].apply(parse_date)
 
-        # テキスト列のNaN処理
         text_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "備考"]
         for col in text_cols:
             df[col] = df[col].fillna("").astype(str)
@@ -79,12 +77,8 @@ def load_data():
         ])
 
 def set_validation_rules(sheet):
-    """スプレッドシートのH列(優先度)とI列(進捗)にプルダウンを設定する"""
-    # H列はインデックス7, I列はインデックス8 (0始まり)
-    # 行は2行目(index 1)から1000行目まで
-    
+    """プルダウン設定"""
     requests = [
-        # 1. 優先度 (H列) のプルダウン設定
         {
             "setDataValidation": {
                 "range": {
@@ -104,7 +98,6 @@ def set_validation_rules(sheet):
                 }
             }
         },
-        # 2. 進捗 (I列) のプルダウン設定
         {
             "setDataValidation": {
                 "range": {
@@ -125,12 +118,10 @@ def set_validation_rules(sheet):
             }
         }
     ]
-    # APIリクエスト送信
     sheet.batch_update({"requests": requests})
 
-
 def save_data(df):
-    """Googleスプレッドシートにデータを保存する"""
+    """保存処理"""
     try:
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
@@ -144,16 +135,13 @@ def save_data(df):
         
         data_to_write = save_df.values.tolist()
         
-        # 入力規則を守るため、値のみクリアして書き込む
         sheet.batch_clear(["A2:L1000"]) 
         if len(data_to_write) > 0:
             sheet.update(range_name=f'A2', values=data_to_write)
         
-        # ★ここでプルダウン設定を適用する
         try:
             set_validation_rules(sheet)
         except Exception as e:
-            # 万が一プルダウン設定でコケてもデータ保存は成功させるためpass
             print(f"Validation Error: {e}")
             
         return True
@@ -162,13 +150,20 @@ def save_data(df):
         st.error(f"スプレッドシート保存エラー: {e}")
         return False
 
-def send_gmail(subject, body, to_email, from_email, app_password):
-    """Gmail送信関数"""
+# --- メール送信関数（名前対応版） ---
+def send_gmail(subject, body, to_email, to_name, from_email, from_name, app_password):
+    """
+    Gmail送信関数 (日本語名対応)
+    to_name: 宛名 (例: 鈴木部長)
+    from_name: 送信者名 (例: タスク管理Bot)
+    """
     try:
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = from_email
-        msg['To'] = to_email
+        msg = MIMEText(body, 'plain', 'utf-8')
+        msg['Subject'] = Header(subject, 'utf-8')
+        
+        # 名前付きのアドレスを作成 ( 例: "タスク管理Bot <sender@gmail.com>" )
+        msg['From'] = formataddr((Header(from_name, 'utf-8').encode(), from_email))
+        msg['To'] = formataddr((Header(to_name, 'utf-8').encode(), to_email))
         msg['Date'] = formatdate()
 
         smtpobj = smtplib.SMTP('smtp.gmail.com', 587)
@@ -236,14 +231,24 @@ with col_alert:
 
 with st.sidebar:
     st.header("📧 通知設定 (Gmail)")
+    
+    st.markdown("#### 送信元設定")
     gmail_user = st.text_input("送信元Gmailアドレス", placeholder="your_email@gmail.com")
-    gmail_pass = st.text_input("Googleアプリパスワード", type="password")
+    gmail_name = st.text_input("送信元名 (表示名)", placeholder="タスク管理システム", help="メールの差出人名として表示されます")
+    gmail_pass = st.text_input("Googleアプリパスワード", type="password", help="Googleアカウント設定で生成した16桁のパスワード")
+    
+    st.markdown("#### 送信先設定")
     target_email = st.text_input("送信先メールアドレス", placeholder="boss@company.com")
+    target_name = st.text_input("送信先名 (宛名)", placeholder="〇〇部長", help="メールの宛名として使用されます")
     
     if st.button("📩 今すぐ通知を送る"):
         if alert_count > 0:
             if gmail_user and gmail_pass and target_email:
-                body = "【タスク管理アプリからの通知】\n\n以下のタスクが未完了、または期限切れです。\n\n"
+                # 名前が空欄の場合はデフォルト値を設定
+                final_from_name = gmail_name if gmail_name else "タスク管理通知"
+                final_to_name = target_name if target_name else "担当者様"
+                
+                body = f"{final_to_name}\n\n【タスク管理アプリからの通知】\n以下のタスクが未完了、または期限切れです。\n\n"
                 for idx, row in alert_rows.iterrows():
                     assignees = f"{row.get('担当者1','') or ''} {row.get('担当者2','') or ''} {row.get('担当者3','') or ''}"
                     body += f"・タイトル: {row['タイトル']}\n"
@@ -251,10 +256,10 @@ with st.sidebar:
                     body += f"  優先度: {row['優先度']} / 進捗: {row['進捗']}\n"
                     body += "-"*20 + "\n"
                 
-                if send_gmail("【重要】タスク未完了通知", body, target_email, gmail_user, gmail_pass):
-                    st.success("メールを送信しました！")
+                if send_gmail("【重要】タスク未完了通知", body, target_email, final_to_name, gmail_user, final_from_name, gmail_pass):
+                    st.success(f"{final_to_name} 宛にメールを送信しました！")
             else:
-                st.error("メール設定を全て入力してください。")
+                st.error("必須項目（アドレス・パスワード）を入力してください。")
         else:
             st.info("通知対象のタスクはありません。")
 
@@ -285,148 +290,3 @@ with st.expander(f"**タスク新規登録 / {'編集' if st.session_state.editi
         details = st.text_area("②詳細", value=task_to_edit.get("詳細", ""))
         remarks = st.text_area("⑨備考 (遅延理由など)", value=task_to_edit.get("備考", ""))
         status = st.selectbox("⑥進捗", options=STATUS_OPTIONS, index=STATUS_OPTIONS.index(task_to_edit.get("進捗", STATUS_OPTIONS[0])))
-        
-        def get_default_date(key, days_offset=0):
-            val = task_to_edit.get(key)
-            if isinstance(val, datetime.date): return val
-            return datetime.date.today() + datetime.timedelta(days=days_offset)
-
-        due_date = st.date_input("⑦期限", value=get_default_date("期限", 7))
-        comp_default = get_default_date("完了日", 0) if status=="完了" else None
-        completion_date = st.date_input("⑧完了日", value=comp_default)
-
-    if st.button("タスクを登録・更新", type="primary"):
-        if not title:
-            st.error("タイトルは必須です。")
-        else:
-            new_task = {
-                "削除": False, "タイトル": title, "詳細": details, "依頼者": requester, 
-                "担当者1": assignee1, "担当者2": assignee2, "担当者3": assignee3,
-                "優先度": priority, "進捗": status, 
-                "期限": due_date, "完了日": completion_date if completion_date and status == "完了" else None,
-                "備考": remarks
-            }
-            
-            if st.session_state.edit_index is not None:
-                st.session_state.tasks_df.loc[st.session_state.edit_index] = new_task
-                st.success(f"更新しました: {title}")
-                st.session_state.editing_task = None
-                st.session_state.edit_index = None
-            else:
-                new_task_df = pd.DataFrame([new_task])
-                st.session_state.tasks_df = pd.concat([st.session_state.tasks_df, new_task_df], ignore_index=True)
-                st.success(f"登録しました: {title}")
-            
-            st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
-            save_data(st.session_state.tasks_df)
-            st.rerun()
-
-    if st.session_state.editing_task and st.button("キャンセル"):
-        st.session_state.editing_task = None
-        st.session_state.edit_index = None
-        st.rerun()
-
-st.markdown("---")
-
-# ------------------------------------------------
-## 2. フィルター & 一覧
-# ------------------------------------------------
-with st.expander("🔎 フィルター", expanded=False):
-    f_c1, f_c2, f_c3 = st.columns(3)
-    with f_c1: f_pri = st.multiselect("優先度", PRIORITY_OPTIONS)
-    with f_c2:
-        all_assignees = pd.unique(st.session_state.tasks_df[['担当者1', '担当者2', '担当者3']].astype(str).values.ravel('K'))
-        all_assignees = [x for x in all_assignees if x != "" and x != "nan" and x != "None"]
-        f_ass = st.multiselect("担当者 (いずれかに該当)", all_assignees)
-    with f_c3: f_key = st.text_input("キーワード検索")
-
-# フィルター適用
-df_filtered = st.session_state.tasks_df.copy()
-if f_pri: df_filtered = df_filtered[df_filtered['優先度'].isin(f_pri)]
-if f_ass:
-    mask = (df_filtered['担当者1'].isin(f_ass)) | (df_filtered['担当者2'].isin(f_ass)) | (df_filtered['担当者3'].isin(f_ass))
-    df_filtered = df_filtered[mask]
-if f_key: df_filtered = df_filtered[df_filtered['タイトル'].str.contains(f_key, na=False) | df_filtered['詳細'].str.contains(f_key, na=False)]
-
-# 分割
-df_active = df_filtered[df_filtered['進捗'] != '完了'].copy()
-df_completed = df_filtered[df_filtered['進捗'] == '完了'].copy()
-
-# === カラム設定 ===
-col_cfg = {
-    "削除": st.column_config.CheckboxColumn(width="small", label="削除"),
-    "タイトル": st.column_config.TextColumn(width="medium"),
-    "詳細": st.column_config.TextColumn(width="large"),
-    "依頼者": st.column_config.TextColumn(width="small"),
-    "担当者1": st.column_config.TextColumn(width="small", label="担当1"),
-    "担当者2": st.column_config.TextColumn(width="small", label="担当2"),
-    "担当者3": st.column_config.TextColumn(width="small", label="担当3"),
-    "優先度": st.column_config.SelectboxColumn(options=PRIORITY_OPTIONS, width="small"),
-    "進捗": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, width="small"),
-    "期限": st.column_config.DateColumn(format="YYYY-MM-DD", width="medium"),
-    "完了日": st.column_config.DateColumn(format="YYYY-MM-DD", width="medium"),
-    "備考": st.column_config.TextColumn(width="large"),
-}
-
-cols_order = [
-    "削除", "タイトル", "詳細", "依頼者", 
-    "担当者1", "担当者2", "担当者3", 
-    "優先度", "進捗", "期限", "完了日", "備考"
-]
-
-# --- A. 未完了 ---
-st.subheader("🔥 未完了タスク")
-df_active = ensure_date_columns(df_active)
-edited_active = st.data_editor(
-    df_active, 
-    column_config=col_cfg, 
-    column_order=cols_order, 
-    hide_index=True, 
-    key="ed_act", 
-    num_rows="dynamic"
-)
-
-if st.session_state.ed_act.get("edited_rows"):
-    for idx, changes in st.session_state.ed_act["edited_rows"].items():
-        real_idx = df_active.index[idx]
-        for col, val in changes.items():
-            st.session_state.tasks_df.at[real_idx, col] = val
-    st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
-    save_data(st.session_state.tasks_df)
-    st.rerun()
-
-if st.button("🗑️ チェックした行を削除 (未完了)"):
-    del_idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
-    if len(del_idx) > 0:
-        st.session_state.tasks_df = st.session_state.tasks_df.drop(del_idx).reset_index(drop=True)
-        save_data(st.session_state.tasks_df)
-        st.rerun()
-
-st.markdown("---")
-
-# --- B. 完了済み ---
-st.subheader("✅ 完了済みタスク")
-df_completed = ensure_date_columns(df_completed)
-edited_completed = st.data_editor(
-    df_completed, 
-    column_config=col_cfg, 
-    column_order=cols_order, 
-    hide_index=True, 
-    key="ed_comp"
-)
-
-if st.session_state.ed_comp.get("edited_rows"):
-    for idx, changes in st.session_state.ed_comp["edited_rows"].items():
-        real_idx = df_completed.index[idx]
-        for col, val in changes.items():
-            st.session_state.tasks_df.at[real_idx, col] = val
-    st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
-    save_data(st.session_state.tasks_df)
-    st.rerun()
-
-st.markdown("---")
-
-# CSV出力
-csv_buffer = io.StringIO()
-st.session_state.tasks_df.drop(columns=['削除'], errors='ignore').to_csv(csv_buffer, index=False, encoding='utf_8_sig')
-st.download_button("📥 CSV出力", csv_buffer.getvalue(), "tasks.csv", "text/csv")
