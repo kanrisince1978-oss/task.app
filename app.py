@@ -15,7 +15,6 @@ STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
 # ★重要★ スプレッドシートの列順序定義 (A列～K列)
-# アプリはこの順番に合わせてデータを保存します
 SPREADSHEET_ORDER = [
     "タイトル", "詳細", "依頼者", 
     "担当者1", "担当者2", "担当者3", 
@@ -67,7 +66,6 @@ def load_data():
         return df
     except Exception as e:
         st.error(f"データ読み込みエラー: {e}")
-        # エラー時は安全な空データを返す
         cols_with_del = ["削除"] + SPREADSHEET_ORDER
         return pd.DataFrame(columns=cols_with_del)
 
@@ -91,30 +89,32 @@ def save_data(df):
         save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
         
         # 4. 書き込み
-        # A2:K1000 (11列分) をクリアして書き込む
         sheet.batch_clear(["A2:K1000"])
         data = save_df.values.tolist()
         if len(data) > 0:
             sheet.update(range_name='A2', values=data)
             
         set_validation(sheet)
+        
+        # ★保存成功時にキャッシュをクリアして、次回確実に最新データを読み込むようにする
+        st.cache_data.clear()
+        
         return True
     except Exception as e:
         st.error(f"保存エラー: {e}")
         return False
 
 def set_validation(sheet):
-    # 列順序: タイトル(A), 詳細(B), 依頼者(C), 担当1(D), 担当2(E), 担当3(F), 優先度(G=6), 進捗(H=7)
     requests = [
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7}, # G列(優先度)
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7},
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in PRIORITY_OPTIONS]}, "showCustomUi": True}
             }
         },
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8}, # H列(進捗)
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8},
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in STATUS_OPTIONS]}, "showCustomUi": True}
             }
         }
@@ -151,8 +151,20 @@ def ensure_date_columns(df):
 # --- UI構築 ---
 st.set_page_config(layout="wide", page_title="社内タスク管理システム", page_icon="📝")
 
+# --- セッション状態の初期化と「列ズレ」自動修復ロジック ---
+# 1. データフレームが存在しない場合はロード
 if 'tasks_df' not in st.session_state:
     st.session_state.tasks_df = ensure_date_columns(load_data())
+
+# 2. 【重要】現在のデータフレームの列構成が、最新の定義と合っているかチェック
+current_cols = set(st.session_state.tasks_df.columns)
+required_cols = set(["削除"] + SPREADSHEET_ORDER)
+
+# もし列が足りなかったり多かったりしたら（＝構成が変わっていたら）、強制リロード
+if current_cols != required_cols:
+    st.cache_data.clear() # キャッシュ削除
+    st.session_state.tasks_df = ensure_date_columns(load_data()) # 再読み込み
+
 if 'editing_task' not in st.session_state: st.session_state.editing_task = None
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
@@ -179,12 +191,17 @@ with col_a:
     if alert_count > 0:
         st.markdown(f"<h3 style='color:red'>⚠️ 未完了・期限切れ: {alert_count}件</h3>", unsafe_allow_html=True)
 
-# サイドバー (空欄自由入力に変更)
+# サイドバー (Gmail設定修正版)
 with st.sidebar:
     st.header("📧 通知設定")
     
-    # デフォルト値を空欄にするため value="" に設定
-    gmail_user = st.text_input("送信元Gmail", value="", placeholder="your_email@gmail.com")
+    # Secretsから初期値を取得
+    def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
+    
+    # 1. 送信元Gmail: Secretsがあればそれを初期値に、なければ空欄
+    gmail_user = st.text_input("送信元Gmail", value=def_user, placeholder="your_email@gmail.com")
+    
+    # 2. 送信元名 & パスワード: 常に空欄スタート（自由入力）
     gmail_name = st.text_input("送信元名", value="", placeholder="タスク管理Bot")
     gmail_pass = st.text_input("アプリパスワード", value="", type="password", help="16桁のGoogleアプリパスワード")
     
@@ -324,7 +341,7 @@ if st.button("🗑️ チェックした行を削除 (未完了)"):
     if len(idx)>0:
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
-        # 削除列のリセット（再挿入ではなく値の初期化）
+        # 削除列のリセット（再構築ではなく値の初期化）
         if "削除" not in st.session_state.tasks_df.columns:
             st.session_state.tasks_df.insert(0, "削除", False)
         else:
