@@ -14,6 +14,13 @@ PRIORITY_OPTIONS = ["高", "中", "低"]
 STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
+# スプレッドシートの列順序定義（ここを基準にします）
+SPREADSHEET_ORDER = [
+    "タイトル", "詳細", "優先度", "依頼者", 
+    "担当者1", "担当者2", "担当者3", 
+    "進捗", "期限", "完了日", "備考"
+]
+
 # --- Google Sheets 認証 ---
 def get_gspread_client():
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -24,25 +31,21 @@ def get_gspread_client():
 
 # --- データロード・保存 ---
 def load_data():
-    # 期待するカラム構成（スプレッドシート側）
-    EXPECTED_COLS = ["タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"]
-    
     try:
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # データが空、または列が足りない場合の補正
+        # 空の場合の初期化
         if df.empty:
-            df = pd.DataFrame(columns=EXPECTED_COLS)
-        
-        # 足りない列があれば自動追加（これがKeyErrorを防ぎます）
-        for c in EXPECTED_COLS:
-            if c not in df.columns:
-                df[c] = ""
+            df = pd.DataFrame(columns=SPREADSHEET_ORDER)
 
-        # スプレッドシート側に「削除」列が残っていたら消す（アプリ内で管理するため）
+        # 必須カラム確保
+        for c in SPREADSHEET_ORDER:
+            if c not in df.columns: df[c] = ""
+
+        # スプレッドシート由来の「削除」列があれば消す
         if "削除" in df.columns:
             df = df.drop(columns=["削除"])
             
@@ -63,25 +66,31 @@ def load_data():
         return df
     except Exception as e:
         st.error(f"データ読み込みエラー: {e}")
-        # エラー時もアプリが落ちないよう空のDataFrameを返す
-        cols = ["削除"] + EXPECTED_COLS
-        return pd.DataFrame(columns=cols)
+        # エラー時は安全な空データを返す
+        cols_with_del = ["削除"] + SPREADSHEET_ORDER
+        return pd.DataFrame(columns=cols_with_del)
 
 def save_data(df):
     try:
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
+        
+        # 保存用にコピー
         save_df = df.copy()
         
-        # 保存前に「削除」列を確実に消す
+        # 1. 「削除」列がある場合は消す
         if "削除" in save_df.columns:
             save_df = save_df.drop(columns=["削除"])
 
+        # 2. 日付を文字列化
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
-        # 入力規則用バッチクリア＆更新
-        # 列数に合わせて範囲指定 (タイトルA列〜備考K列 = A:K)
+        # 3. 列の並び順をスプレッドシートの定義通りに強制整列させる
+        save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
+        
+        # 4. 書き込み
+        # A2:K1000 (11列分) をクリアして書き込む
         sheet.batch_clear(["A2:K1000"])
         data = save_df.values.tolist()
         if len(data) > 0:
@@ -94,8 +103,7 @@ def save_data(df):
         return False
 
 def set_validation(sheet):
-    # タイトル(A), 詳細(B), 優先度(C=2), 依頼者(D), 担当1(E), 担当2(F), 担当3(G), 進捗(H=7)
-    # ※スプレッドシートの並び順に合わせる必要があります
+    # 列順序: タイトル(A), 詳細(B), 優先度(C=2), 依頼者(D), 担当1(E), 担当2(F), 担当3(G), 進捗(H=7)
     requests = [
         {
             "setDataValidation": {
@@ -154,8 +162,7 @@ st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 today = datetime.date.today()
 df_alert = st.session_state.tasks_df.copy()
 try:
-    # 必須カラムが存在するか確認してから処理
-    if '進捗' in df_alert.columns and '期限' in df_alert.columns and '優先度' in df_alert.columns:
+    if '進捗' in df_alert.columns and '期限' in df_alert.columns:
         due_ts = pd.to_datetime(df_alert['期限'], errors='coerce')
         is_expired = due_ts < pd.Timestamp(today)
         alert_rows = df_alert[(df_alert['進捗'] != '完了') & (is_expired | (df_alert['優先度'] == '高'))]
@@ -263,7 +270,6 @@ with st.expander("🔎 フィルター"):
     
     all_ass = []
     if not st.session_state.tasks_df.empty:
-        # カラムが存在するか確認してからアクセス
         ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
         if ass_cols:
             all_ass_raw = st.session_state.tasks_df[ass_cols].astype(str).values.ravel('K')
@@ -314,11 +320,17 @@ if st.session_state.act.get("edited_rows"):
     st.rerun()
 
 if st.button("🗑️ チェックした行を削除 (未完了)"):
+    # ★ここが修正ポイント★
     idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
     if len(idx)>0:
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
-        st.session_state.tasks_df.insert(0, "削除", False) # 再構築
+        # 削除列を「再挿入」ではなく「再構築」する（既存なら値をFalseにする）
+        if "削除" in st.session_state.tasks_df.columns:
+            st.session_state.tasks_df["削除"] = False
+        else:
+            st.session_state.tasks_df.insert(0, "削除", False)
+            
         save_data(st.session_state.tasks_df)
         st.rerun()
 
