@@ -14,11 +14,12 @@ PRIORITY_OPTIONS = ["高", "中", "低"]
 STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
-# スプレッドシートの列順序定義（ここを基準にします）
+# ★重要★ スプレッドシートの列順序定義 (A列～K列)
+# アプリはこの順番に合わせてデータを保存します
 SPREADSHEET_ORDER = [
-    "タイトル", "詳細", "優先度", "依頼者", 
+    "タイトル", "詳細", "依頼者", 
     "担当者1", "担当者2", "担当者3", 
-    "進捗", "期限", "完了日", "備考"
+    "優先度", "進捗", "期限", "完了日", "備考"
 ]
 
 # --- Google Sheets 認証 ---
@@ -103,11 +104,11 @@ def save_data(df):
         return False
 
 def set_validation(sheet):
-    # 列順序: タイトル(A), 詳細(B), 優先度(C=2), 依頼者(D), 担当1(E), 担当2(F), 担当3(G), 進捗(H=7)
+    # 列順序: タイトル(A), 詳細(B), 依頼者(C), 担当1(D), 担当2(E), 担当3(F), 優先度(G=6), 進捗(H=7)
     requests = [
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 2, "endColumnIndex": 3}, # C列(優先度)
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7}, # G列(優先度)
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in PRIORITY_OPTIONS]}, "showCustomUi": True}
             }
         },
@@ -178,19 +179,17 @@ with col_a:
     if alert_count > 0:
         st.markdown(f"<h3 style='color:red'>⚠️ 未完了・期限切れ: {alert_count}件</h3>", unsafe_allow_html=True)
 
-# サイドバー
+# サイドバー (空欄自由入力に変更)
 with st.sidebar:
     st.header("📧 通知設定")
-    def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
-    def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
-    def_name = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
     
-    gmail_user = st.text_input("送信元Gmail", value=def_user)
-    gmail_name = st.text_input("送信元名", value=def_name)
-    gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password")
+    # デフォルト値を空欄にするため value="" に設定
+    gmail_user = st.text_input("送信元Gmail", value="", placeholder="your_email@gmail.com")
+    gmail_name = st.text_input("送信元名", value="", placeholder="タスク管理Bot")
+    gmail_pass = st.text_input("アプリパスワード", value="", type="password", help="16桁のGoogleアプリパスワード")
     
     st.markdown("---")
-    target_email = st.text_input("送信先メール")
+    target_email = st.text_input("送信先メール", placeholder="boss@company.com")
     target_name = st.text_input("宛名 (〇〇様)")
     
     if st.button("📩 通知送信"):
@@ -212,17 +211,17 @@ with st.expander(f"**タスク登録 / 編集**", expanded=True):
     with c1:
         title = st.text_input("①タイトル", value=task.get("タイトル", ""))
         details = st.text_area("②詳細", value=task.get("詳細", ""), height=100)
-        priority = st.selectbox("③優先度", PRIORITY_OPTIONS, index=PRIORITY_OPTIONS.index(task.get("優先度", "高")))
         last_req = st.session_state.tasks_df["依頼者"].iloc[-1] if not st.session_state.tasks_df.empty else ""
-        requester = st.text_input("④依頼者", value=task.get("依頼者", last_req))
-
-    with c2:
-        st.write("⑤担当者")
+        requester = st.text_input("③依頼者", value=task.get("依頼者", last_req))
+        
+        st.write("④担当者")
         ac1, ac2, ac3 = st.columns(3)
         as1 = ac1.text_input("担当1", task.get("担当者1",""), label_visibility="collapsed", placeholder="担当1")
         as2 = ac2.text_input("担当2", task.get("担当者2",""), label_visibility="collapsed", placeholder="担当2")
         as3 = ac3.text_input("担当3", task.get("担当者3",""), label_visibility="collapsed", placeholder="担当3")
-        
+
+    with c2:
+        priority = st.selectbox("⑤優先度", PRIORITY_OPTIONS, index=PRIORITY_OPTIONS.index(task.get("優先度", "高")))
         status = st.selectbox("⑥進捗", STATUS_OPTIONS, index=STATUS_OPTIONS.index(task.get("進捗", "未対応")))
         
         dc1, dc2 = st.columns(2)
@@ -239,8 +238,9 @@ with st.expander(f"**タスク登録 / 編集**", expanded=True):
             st.error("タイトルは必須です")
         else:
             new_data = {
-                "削除": False, "タイトル": title, "詳細": details, "優先度": priority, "依頼者": requester,
-                "担当者1": as1, "担当者2": as2, "担当者3": as3, "進捗": status,
+                "削除": False, "タイトル": title, "詳細": details, "依頼者": requester,
+                "担当者1": as1, "担当者2": as2, "担当者3": as3, 
+                "優先度": priority, "進捗": status,
                 "期限": due_date, "完了日": completion_date if completion_date and status=="完了" else None, "備考": remarks
             }
             if st.session_state.edit_index is not None:
@@ -300,7 +300,7 @@ col_cfg = {
 # --- A. 未完了タスク ---
 st.subheader("🔥 未完了タスク")
 df_active = ensure_date_columns(df_active)
-active_cols = ["削除","タイトル","詳細","優先度","依頼者","担当者1","担当者2","担当者3","進捗","期限","完了日","備考"]
+active_cols = ["削除","タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
 
 ed_act = st.data_editor(
     df_active, 
@@ -320,16 +320,15 @@ if st.session_state.act.get("edited_rows"):
     st.rerun()
 
 if st.button("🗑️ チェックした行を削除 (未完了)"):
-    # ★ここが修正ポイント★
     idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
     if len(idx)>0:
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
-        # 削除列を「再挿入」ではなく「再構築」する（既存なら値をFalseにする）
-        if "削除" in st.session_state.tasks_df.columns:
-            st.session_state.tasks_df["削除"] = False
-        else:
+        # 削除列のリセット（再挿入ではなく値の初期化）
+        if "削除" not in st.session_state.tasks_df.columns:
             st.session_state.tasks_df.insert(0, "削除", False)
+        else:
+            st.session_state.tasks_df["削除"] = False
             
         save_data(st.session_state.tasks_df)
         st.rerun()
@@ -339,7 +338,7 @@ st.markdown("---")
 # --- B. 完了済みタスク ---
 st.subheader("✅ 完了済みタスク")
 df_completed = ensure_date_columns(df_completed)
-completed_cols = ["タイトル","詳細","優先度","依頼者","担当者1","担当者2","担当者3","進捗","期限","完了日","備考"]
+completed_cols = ["タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
 
 ed_comp = st.data_editor(
     df_completed, 
