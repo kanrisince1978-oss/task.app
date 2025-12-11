@@ -24,6 +24,9 @@ def get_gspread_client():
 
 # --- データロード・保存 ---
 def load_data():
+    # 万が一エラーが起きてもアプリを落とさないためのデフォルト空データ
+    empty_df = pd.DataFrame(columns=["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
+    
     try:
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
@@ -31,15 +34,17 @@ def load_data():
         df = pd.DataFrame(data)
         
         if df.empty:
-            df = pd.DataFrame(columns=["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
+            return empty_df
 
         # 必須カラム確保
         req_cols = ["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"]
         for c in req_cols:
             if c not in df.columns: df[c] = ""
 
+        # 削除フラグ
         df['削除'] = df['削除'].apply(lambda x: True if str(x).upper() == 'TRUE' else False)
 
+        # 日付処理
         def parse_date(x):
             if not x or str(x).strip() == "": return None
             try: return pd.to_datetime(x).date()
@@ -48,13 +53,16 @@ def load_data():
         df['期限'] = df['期限'].apply(parse_date)
         df['完了日'] = df['完了日'].apply(parse_date)
 
+        # 文字列処理
         text_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "備考"]
         for c in text_cols: df[c] = df[c].fillna("").astype(str)
 
         return df
+        
     except Exception as e:
+        # エラー詳細を表示しつつ、アプリが落ちないように空の形式データを返す
         st.error(f"データ読み込みエラー: {e}")
-        return pd.DataFrame()
+        return empty_df
 
 def save_data(df):
     try:
@@ -73,7 +81,7 @@ def save_data(df):
         if len(data) > 0:
             sheet.update(range_name='A2', values=data)
             
-        # プルダウン設定（簡易版）
+        # プルダウン設定
         set_validation(sheet)
         return True
     except Exception as e:
@@ -81,7 +89,6 @@ def save_data(df):
         return False
 
 def set_validation(sheet):
-    # H列(優先度:index7), I列(進捗:index8)
     requests = [
         {
             "setDataValidation": {
@@ -140,7 +147,6 @@ st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 today = datetime.date.today()
 df_alert = st.session_state.tasks_df.copy()
 try:
-    # 日付比較エラー対策
     due_ts = pd.to_datetime(df_alert['期限'], errors='coerce')
     is_expired = due_ts < pd.Timestamp(today)
     alert_rows = df_alert[(df_alert['進捗'] != '完了') & (is_expired | (df_alert['優先度'] == '高'))]
@@ -154,10 +160,9 @@ with col_a:
     if alert_count > 0:
         st.markdown(f"<h3 style='color:red'>⚠️ 未完了・期限切れ: {alert_count}件</h3>", unsafe_allow_html=True)
 
-# サイドバー（Secretsから自動入力）
+# サイドバー
 with st.sidebar:
     st.header("📧 通知設定")
-    # Secretsから初期値を取得
     def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
     def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
     def_name = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
@@ -181,34 +186,27 @@ with st.sidebar:
         else:
             st.error("設定不足または対象タスクがありません")
 
-# --- タスク登録フォーム (順番整理済み) ---
+# --- タスク登録フォーム ---
 with st.expander(f"**タスク登録 / 編集**", expanded=True):
     task = st.session_state.editing_task if st.session_state.editing_task else {}
     c1, c2 = st.columns(2)
     
     with c1:
-        # 1. タイトル
         title = st.text_input("①タイトル", value=task.get("タイトル", ""))
-        # 3. 詳細
         details = st.text_area("②詳細", value=task.get("詳細", ""), height=100)
-        # 4. 優先度
         priority = st.selectbox("③優先度", PRIORITY_OPTIONS, index=PRIORITY_OPTIONS.index(task.get("優先度", "高")))
-        # 5. 依頼者
         last_req = st.session_state.tasks_df["依頼者"].iloc[-1] if not st.session_state.tasks_df.empty else ""
         requester = st.text_input("④依頼者", value=task.get("依頼者", last_req))
 
     with c2:
-        # 5. 担当者
         st.write("⑤担当者")
         ac1, ac2, ac3 = st.columns(3)
         as1 = ac1.text_input("担当1", task.get("担当者1",""), label_visibility="collapsed", placeholder="担当1")
         as2 = ac2.text_input("担当2", task.get("担当者2",""), label_visibility="collapsed", placeholder="担当2")
         as3 = ac3.text_input("担当3", task.get("担当者3",""), label_visibility="collapsed", placeholder="担当3")
         
-        # 6. 進捗
         status = st.selectbox("⑥進捗", STATUS_OPTIONS, index=STATUS_OPTIONS.index(task.get("進捗", "未対応")))
         
-        # 7. 期限 & 8. 完了日 (復活)
         dc1, dc2 = st.columns(2)
         def_due = task.get("期限") if isinstance(task.get("期限"), datetime.date) else datetime.date.today() + datetime.timedelta(days=7)
         due_date = dc1.date_input("⑦期限", value=def_due)
@@ -216,7 +214,6 @@ with st.expander(f"**タスク登録 / 編集**", expanded=True):
         def_comp = task.get("完了日") if isinstance(task.get("完了日"), datetime.date) else (datetime.date.today() if status=="完了" else None)
         completion_date = dc2.date_input("⑧完了日", value=def_comp)
 
-        # 9. 備考
         remarks = st.text_area("⑨備考", value=task.get("備考", ""))
 
     if st.button("登録・更新", type="primary"):
@@ -248,12 +245,21 @@ with st.expander(f"**タスク登録 / 編集**", expanded=True):
 
 st.markdown("---")
 
-# --- フィルター & 一覧 (復活) ---
+# --- フィルター & 一覧 ---
 with st.expander("🔎 フィルター"):
     fc1, fc2, fc3 = st.columns(3)
     f_pri = fc1.multiselect("優先度", PRIORITY_OPTIONS)
-    all_ass = pd.unique(st.session_state.tasks_df[['担当者1','担当者2','担当者3']].astype(str).values.ravel('K'))
-    f_ass = fc2.multiselect("担当者", [x for x in all_ass if x and x!="nan"])
+    
+    # 担当者リストの安全な取得
+    all_ass = []
+    if not st.session_state.tasks_df.empty:
+        # 担当者1~3の値をまとめて取得して重複排除
+        all_ass_raw = st.session_state.tasks_df[['担当者1','担当者2','担当者3']].astype(str).values.ravel('K')
+        all_ass = pd.unique(all_ass_raw)
+        # 空文字やnanを除去
+        all_ass = [x for x in all_ass if x and x.lower() != "nan" and x.lower() != "none"]
+    
+    f_ass = fc2.multiselect("担当者", all_ass)
     f_key = fc3.text_input("検索")
 
 df_view = st.session_state.tasks_df.copy()
