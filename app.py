@@ -30,16 +30,19 @@ def load_data():
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # スプレッドシートが空の場合の初期化
         if df.empty:
             df = pd.DataFrame(columns=["タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
 
-        # 必須カラム確保 (削除列はスプレッドシートには無いので除外)
+        # 必須カラム確保
         req_cols = ["タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"]
         for c in req_cols:
             if c not in df.columns: df[c] = ""
 
-        # 【重要】アプリ操作用として、一時的に「削除」列を先頭に追加（Falseで初期化）
+        # スプレッドシートに「削除」列が残っていたら削除して、メモリ上だけで作り直す
+        if "削除" in df.columns:
+            df = df.drop(columns=["削除"])
+            
+        # アプリ操作用として先頭に「削除」列を追加（Falseで初期化）
         df.insert(0, "削除", False)
 
         def parse_date(x):
@@ -56,8 +59,7 @@ def load_data():
         return df
     except Exception as e:
         st.error(f"データ読み込みエラー: {e}")
-        # エラー時は空データを返す
-        return pd.DataFrame(columns=["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
+        return pd.DataFrame()
 
 def save_data(df):
     try:
@@ -65,14 +67,15 @@ def save_data(df):
         sheet = client.open(SHEET_NAME).sheet1
         save_df = df.copy()
         
-        # 保存前に「削除」列を消す（スプレッドシートに反映させないため）
+        # 保存前に「削除」列を確実に消す
         if "削除" in save_df.columns:
             save_df = save_df.drop(columns=["削除"])
 
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
-        # 入力規則用バッチクリア＆更新 (A2からK1000までクリア: 列数が減ったためLではなくK)
+        # 入力規則用バッチクリア＆更新
+        # 列数に合わせて範囲指定 (タイトルA列〜備考K列 = A:K)
         sheet.batch_clear(["A2:K1000"])
         data = save_df.values.tolist()
         if len(data) > 0:
@@ -85,18 +88,17 @@ def save_data(df):
         return False
 
 def set_validation(sheet):
-    # 列位置が変わりました
     # タイトル(A), 詳細(B), 依頼者(C), 担当1(D), 担当2(E), 担当3(F), 優先度(G=6), 進捗(H=7)
     requests = [
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7}, # G列
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7},
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in PRIORITY_OPTIONS]}, "showCustomUi": True}
             }
         },
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8}, # H列
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8},
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in STATUS_OPTIONS]}, "showCustomUi": True}
             }
         }
@@ -266,19 +268,30 @@ if f_key: df_view = df_view[df_view['タイトル'].str.contains(f_key, na=False
 df_active = df_view[df_view['進捗'] != '完了'].copy()
 df_completed = df_view[df_view['進捗'] == '完了'].copy()
 
-# カラム設定
+# カラム設定 (共通)
 col_cfg = {
-    "削除": st.column_config.CheckboxColumn(width="small"),
+    "削除": st.column_config.CheckboxColumn(width="small", label="🗑️"), # アイコンのみ表示
     "期限": st.column_config.DateColumn(format="YYYY-MM-DD"),
     "完了日": st.column_config.DateColumn(format="YYYY-MM-DD"),
     "優先度": st.column_config.SelectboxColumn(options=PRIORITY_OPTIONS),
     "進捗": st.column_config.SelectboxColumn(options=STATUS_OPTIONS)
 }
-col_ord = ["削除","タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
 
+# --- A. 未完了タスク (削除あり) ---
 st.subheader("🔥 未完了タスク")
 df_active = ensure_date_columns(df_active)
-ed_act = st.data_editor(df_active, column_config=col_cfg, column_order=col_ord, hide_index=True, key="act", num_rows="dynamic")
+
+# 未完了用カラム順序: 先頭に「削除」を入れる
+active_cols_order = ["削除","タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
+
+ed_act = st.data_editor(
+    df_active, 
+    column_config=col_cfg, 
+    column_order=active_cols_order, 
+    hide_index=True, 
+    key="act", 
+    num_rows="dynamic"
+)
 
 if st.session_state.act.get("edited_rows"):
     for idx, chg in st.session_state.act["edited_rows"].items():
@@ -288,19 +301,32 @@ if st.session_state.act.get("edited_rows"):
     save_data(st.session_state.tasks_df)
     st.rerun()
 
-if st.button("🗑️ 削除 (未完了)"):
+if st.button("🗑️ チェックした行を削除 (未完了)"):
     idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
     if len(idx)>0:
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
+        # 削除後、もう一度「削除」列をFalseで作り直す（再利用のため）
+        st.session_state.tasks_df.insert(0, "削除", False) # メモリ上で再配置
         save_data(st.session_state.tasks_df)
         st.rerun()
 
 st.markdown("---")
 
+# --- B. 完了済みタスク (削除なし) ---
 st.subheader("✅ 完了済みタスク")
 df_completed = ensure_date_columns(df_completed)
-ed_comp = st.data_editor(df_completed, column_config=col_cfg, column_order=col_ord, hide_index=True, key="comp")
+
+# 完了用カラム順序: 「削除」を外す
+completed_cols_order = ["タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
+
+ed_comp = st.data_editor(
+    df_completed, 
+    column_config=col_cfg, 
+    column_order=completed_cols_order, 
+    hide_index=True, 
+    key="comp"
+)
 
 if st.session_state.comp.get("edited_rows"):
     for idx, chg in st.session_state.comp["edited_rows"].items():
