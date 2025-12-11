@@ -24,27 +24,24 @@ def get_gspread_client():
 
 # --- データロード・保存 ---
 def load_data():
-    # 万が一エラーが起きてもアプリを落とさないためのデフォルト空データ
-    empty_df = pd.DataFrame(columns=["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
-    
     try:
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
         
+        # スプレッドシートが空の場合の初期化
         if df.empty:
-            return empty_df
+            df = pd.DataFrame(columns=["タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
 
-        # 必須カラム確保
-        req_cols = ["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"]
+        # 必須カラム確保 (削除列はスプレッドシートには無いので除外)
+        req_cols = ["タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"]
         for c in req_cols:
             if c not in df.columns: df[c] = ""
 
-        # 削除フラグ
-        df['削除'] = df['削除'].apply(lambda x: True if str(x).upper() == 'TRUE' else False)
+        # 【重要】アプリ操作用として、一時的に「削除」列を先頭に追加（Falseで初期化）
+        df.insert(0, "削除", False)
 
-        # 日付処理
         def parse_date(x):
             if not x or str(x).strip() == "": return None
             try: return pd.to_datetime(x).date()
@@ -53,16 +50,14 @@ def load_data():
         df['期限'] = df['期限'].apply(parse_date)
         df['完了日'] = df['完了日'].apply(parse_date)
 
-        # 文字列処理
         text_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "備考"]
         for c in text_cols: df[c] = df[c].fillna("").astype(str)
 
         return df
-        
     except Exception as e:
-        # エラー詳細を表示しつつ、アプリが落ちないように空の形式データを返す
         st.error(f"データ読み込みエラー: {e}")
-        return empty_df
+        # エラー時は空データを返す
+        return pd.DataFrame(columns=["削除", "タイトル", "詳細", "優先度", "依頼者", "担当者1", "担当者2", "担当者3", "進捗", "期限", "完了日", "備考"])
 
 def save_data(df):
     try:
@@ -70,18 +65,19 @@ def save_data(df):
         sheet = client.open(SHEET_NAME).sheet1
         save_df = df.copy()
         
+        # 保存前に「削除」列を消す（スプレッドシートに反映させないため）
+        if "削除" in save_df.columns:
+            save_df = save_df.drop(columns=["削除"])
+
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
-        save_df['削除'] = save_df['削除'].apply(lambda x: "TRUE" if x else "FALSE")
-        
-        # 入力規則用バッチクリア＆更新
-        sheet.batch_clear(["A2:L1000"])
+        # 入力規則用バッチクリア＆更新 (A2からK1000までクリア: 列数が減ったためLではなくK)
+        sheet.batch_clear(["A2:K1000"])
         data = save_df.values.tolist()
         if len(data) > 0:
             sheet.update(range_name='A2', values=data)
             
-        # プルダウン設定
         set_validation(sheet)
         return True
     except Exception as e:
@@ -89,16 +85,18 @@ def save_data(df):
         return False
 
 def set_validation(sheet):
+    # 列位置が変わりました
+    # タイトル(A), 詳細(B), 依頼者(C), 担当1(D), 担当2(E), 担当3(F), 優先度(G=6), 進捗(H=7)
     requests = [
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8},
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 6, "endColumnIndex": 7}, # G列
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in PRIORITY_OPTIONS]}, "showCustomUi": True}
             }
         },
         {
             "setDataValidation": {
-                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 8, "endColumnIndex": 9},
+                "range": {"sheetId": sheet.id, "startRowIndex": 1, "endRowIndex": 1000, "startColumnIndex": 7, "endColumnIndex": 8}, # H列
                 "rule": {"condition": {"type": "ONE_OF_LIST", "values": [{"userEnteredValue": v} for v in STATUS_OPTIONS]}, "showCustomUi": True}
             }
         }
@@ -250,13 +248,10 @@ with st.expander("🔎 フィルター"):
     fc1, fc2, fc3 = st.columns(3)
     f_pri = fc1.multiselect("優先度", PRIORITY_OPTIONS)
     
-    # 担当者リストの安全な取得
     all_ass = []
     if not st.session_state.tasks_df.empty:
-        # 担当者1~3の値をまとめて取得して重複排除
         all_ass_raw = st.session_state.tasks_df[['担当者1','担当者2','担当者3']].astype(str).values.ravel('K')
         all_ass = pd.unique(all_ass_raw)
-        # 空文字やnanを除去
         all_ass = [x for x in all_ass if x and x.lower() != "nan" and x.lower() != "none"]
     
     f_ass = fc2.multiselect("担当者", all_ass)
