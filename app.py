@@ -14,6 +14,9 @@ PRIORITY_OPTIONS = ["高", "中", "低"]
 STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
+# ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
+APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
+
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
     "タイトル", "詳細", "依頼者", 
@@ -43,14 +46,11 @@ def load_data():
         for c in SPREADSHEET_ORDER:
             if c not in df.columns: df[c] = ""
 
-        # 不要な列削除
         if "削除" in df.columns: df = df.drop(columns=["削除"])
         if "通知" in df.columns: df = df.drop(columns=["通知"])
             
         # アプリ操作用列の追加
-        # 1. 通知用チェック (デフォルトFalse)
         df.insert(0, "通知", False)
-        # 2. 削除用チェック (デフォルトFalse)
         df.insert(1, "削除", False)
 
         def parse_date(x):
@@ -77,7 +77,6 @@ def save_data(df):
         
         save_df = df.copy()
         
-        # アプリ専用列（通知・削除）はスプレッドシートに保存しない
         if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
         if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
 
@@ -148,7 +147,6 @@ st.set_page_config(layout="wide", page_title="社内タスク管理システム"
 if 'tasks_df' not in st.session_state:
     st.session_state.tasks_df = ensure_date_columns(load_data())
 
-# 列構成チェックと修復
 cols_check = set(["通知", "削除"] + SPREADSHEET_ORDER)
 if set(st.session_state.tasks_df.columns) != cols_check:
     st.cache_data.clear()
@@ -159,7 +157,6 @@ if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# 通知ロジック（画面アラート用）
 today = datetime.date.today()
 df_base = st.session_state.tasks_df.copy()
 
@@ -192,29 +189,21 @@ with st.sidebar:
     st.markdown("---")
     target_email = st.text_input("送信先メール", placeholder="boss@company.com")
     
-    # --- 担当者リストの作成（プルダウン用）---
     all_assignees = []
     if not st.session_state.tasks_df.empty:
         ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
         if ass_cols:
             raw_ass = st.session_state.tasks_df[ass_cols].astype(str).values.ravel('K')
             unique_ass = pd.unique(raw_ass)
-            # 空文字やnanを除外してリスト化
             all_assignees = [x for x in unique_ass if x and x.lower() != "nan" and x.lower() != "none"]
     
-    # 宛名（プルダウン選択）
     target_name = st.selectbox("宛名 (担当者を選択)", options=[""] + sorted(all_assignees))
     
     if st.button("📩 通知送信"):
         if gmail_user and gmail_pass and target_email and target_name:
-            # 1. 「通知」にチェックが入っている行を取得
             checked_rows = df_base[df_base['通知'] == True]
-            
-            # 2. 未完了のものだけに絞る（念のため）
             incomplete_rows = checked_rows[checked_rows['進捗'] != '完了']
             
-            # 3. 選択された担当者（target_name）が含まれるタスクだけに絞る
-            #    担当者1 OR 担当者2 OR 担当者3 に名前があれば対象
             target_rows = incomplete_rows[
                 (incomplete_rows['担当者1'] == target_name) |
                 (incomplete_rows['担当者2'] == target_name) |
@@ -229,6 +218,10 @@ with st.sidebar:
                     assignees = f"{r.get('担当者1','')} {r.get('担当者2','')} {r.get('担当者3','')}"
                     body += f"・{r['タイトル']}\n  期限:{r['期限']} / 担当:{assignees}\n  優先度:{r['優先度']} / 進捗:{r['進捗']}\n\n"
                 
+                # ★URLの追記
+                body += "-"*30 + "\n"
+                body += f"▼ アプリを開いて確認する\n{APP_URL}\n"
+
                 if send_gmail("【タスク通知】未完了案件一覧", body, target_email, target_name, gmail_user, gmail_name, gmail_pass):
                     st.success(f"{target_name}様のタスク {email_count}件を送信しました")
             else:
@@ -311,7 +304,6 @@ if f_key: df_view = df_view[df_view['タイトル'].str.contains(f_key, na=False
 df_active = df_view[df_view['進捗'] != '完了'].copy()
 df_completed = df_view[df_view['進捗'] == '完了'].copy()
 
-# カラム設定
 col_cfg = {
     "通知": st.column_config.CheckboxColumn(width="small", label="✉️", help="チェックしたタスクをメール通知します"),
     "削除": st.column_config.CheckboxColumn(width="small", label="🗑️"),
@@ -321,10 +313,9 @@ col_cfg = {
     "進捗": st.column_config.SelectboxColumn(options=STATUS_OPTIONS)
 }
 
-# A. 未完了タスク (通知・削除あり)
+# A. 未完了タスク
 st.subheader("🔥 未完了タスク")
 df_active = ensure_date_columns(df_active)
-# 通知列を先頭に追加
 active_cols = ["通知", "削除", "タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "優先度", "進捗", "期限", "完了日", "備考"]
 
 ed_act = st.data_editor(
@@ -350,7 +341,6 @@ if st.button("🗑️ チェックした行を削除 (未完了)"):
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
         
-        # 列リセット
         if "削除" not in st.session_state.tasks_df.columns:
             st.session_state.tasks_df.insert(1, "削除", False)
         else:
@@ -366,7 +356,7 @@ if st.button("🗑️ チェックした行を削除 (未完了)"):
 
 st.markdown("---")
 
-# B. 完了済みタスク (通知・削除なし)
+# B. 完了済みタスク
 st.subheader("✅ 完了済みタスク")
 df_completed = ensure_date_columns(df_completed)
 completed_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "優先度", "進捗", "期限", "完了日", "備考"]
