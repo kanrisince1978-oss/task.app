@@ -15,7 +15,7 @@ STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
 # ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
-APP_URL = "https://share.streamlit.io/your-app-url" 
+APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
 
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
@@ -348,3 +348,4 @@ if st.session_state.act.get("edited_rows"):
 if st.button("🗑️ チェックした行を削除 (未完了)"):
     idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
     if len(idx)>0:
+
