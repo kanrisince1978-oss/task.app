@@ -15,7 +15,7 @@ STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
 # ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
-APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
+APP_URL = "https://share.streamlit.io/your-app-url" 
 
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
@@ -191,7 +191,7 @@ with st.sidebar:
     def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
     def_name_val = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
 
-    # 編集不可設定 (disabled=True)
+    # 固定表示（編集不可）
     gmail_user = st.text_input("送信元Gmail", value=def_user, disabled=True, help="Secretsの設定値が使用されます")
     gmail_name = st.text_input("送信元名", value=def_name_val, placeholder="タスク管理Bot")
     gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password", disabled=True, help="Secretsの設定値が使用されます")
@@ -348,4 +348,53 @@ if st.session_state.act.get("edited_rows"):
 if st.button("🗑️ チェックした行を削除 (未完了)"):
     idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
     if len(idx)>0:
+        st.session_state.tasks_df.drop(idx, inplace=True)
+        st.session_state.tasks_df.reset_index(drop=True, inplace=True)
+        
+        if "削除" not in st.session_state.tasks_df.columns:
+            st.session_state.tasks_df.insert(1, "削除", False)
+        else:
+            st.session_state.tasks_df["削除"] = False
+            
+        if "通知" not in st.session_state.tasks_df.columns:
+            st.session_state.tasks_df.insert(0, "通知", False)
+        else:
+            st.session_state.tasks_df["通知"] = False
 
+        save_data(st.session_state.tasks_df)
+        st.rerun()
+
+st.markdown("---")
+
+# B. 完了済みタスク
+st.subheader("✅ 完了済みタスク")
+df_completed = ensure_date_columns(df_completed)
+completed_cols = ["タイトル", "詳細", "依頼者", "担当者1", "担当者2", "担当者3", "優先度", "進捗", "期限", "完了日", "備考"]
+
+ed_comp = st.data_editor(
+    df_completed, 
+    column_config=col_cfg, 
+    column_order=completed_cols, 
+    hide_index=True, 
+    key="comp"
+)
+
+if st.session_state.comp.get("edited_rows"):
+    for idx, chg in st.session_state.comp["edited_rows"].items():
+        real_idx = df_completed.index[idx]
+        for c, v in chg.items(): st.session_state.tasks_df.at[real_idx, c] = v
+    st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
+    save_data(st.session_state.tasks_df)
+    st.rerun()
+
+# --- 接続テスト用ボタン (サイドバーの一番下に追加) ---
+with st.sidebar:
+    st.markdown("---")
+    if st.button("🔧 接続テスト"):
+        try:
+            client = get_gspread_client()
+            sheet = client.open(SHEET_NAME).sheet1
+            val = sheet.acell('A1').value
+            st.success(f"✅ 接続成功！\nスプレッドシートが見つかりました。\nA1セルの値: {val}")
+        except Exception as e:
+            st.error(f"❌ 接続失敗\n原因: {e}")
