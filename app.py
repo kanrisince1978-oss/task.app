@@ -186,15 +186,19 @@ with col_a:
 with st.sidebar:
     st.header("📧 通知設定")
     
-    # Secretsから情報取得 (パスワードも取得するように修正)
+    # Secretsから情報取得
     def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
     def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
     def_name_val = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
 
-    # 固定値をセット (パスワードもtype="password"で自動入力)
-    gmail_user = st.text_input("送信元Gmail", value=def_user, placeholder="your_email@gmail.com")
+    # ★変更点: disabled=True を追加して編集不可にしました
+    gmail_user = st.text_input("送信元Gmail", value=def_user, disabled=True, help="Secretsの設定値が使用されます")
+    
+    # 送信元名は自由入力のまま（必要ならここもdisabled=Trueにできます）
     gmail_name = st.text_input("送信元名", value=def_name_val, placeholder="タスク管理Bot")
-    gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password")
+    
+    # ★変更点: disabled=True を追加して編集不可にしました
+    gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password", disabled=True, help="Secretsの設定値が使用されます")
     
     st.markdown("---")
     target_email = st.text_input("送信先メール", placeholder="boss@company.com")
