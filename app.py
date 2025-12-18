@@ -15,7 +15,7 @@ STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
 # ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
-APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
+APP_URL = "https://share.streamlit.io/your-app-url" 
 
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
@@ -43,9 +43,11 @@ def load_data():
         if df.empty:
             df = pd.DataFrame(columns=SPREADSHEET_ORDER)
 
+        # 必須カラム確保
         for c in SPREADSHEET_ORDER:
             if c not in df.columns: df[c] = ""
 
+        # 不要な列削除
         if "削除" in df.columns: df = df.drop(columns=["削除"])
         if "通知" in df.columns: df = df.drop(columns=["通知"])
             
@@ -77,12 +79,14 @@ def save_data(df):
         
         save_df = df.copy()
         
+        # アプリ専用列（通知・削除）はスプレッドシートに保存しない
         if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
         if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
 
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
+        # 強制整列
         save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
         
         sheet.batch_clear(["A2:K1000"])
@@ -91,7 +95,7 @@ def save_data(df):
             sheet.update(range_name='A2', values=data)
             
         set_validation(sheet)
-        st.cache_data.clear()
+        st.cache_data.clear() # キャッシュクリア
         return True
     except Exception as e:
         st.error(f"保存エラー: {e}")
@@ -157,6 +161,7 @@ if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
+# 通知ロジック（画面アラート用）
 today = datetime.date.today()
 df_base = st.session_state.tasks_df.copy()
 
@@ -181,14 +186,20 @@ with col_a:
 with st.sidebar:
     st.header("📧 通知設定")
     
+    # Secretsから情報取得 (パスワードも取得するように修正)
     def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
+    def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
+    def_name_val = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
+
+    # 固定値をセット (パスワードもtype="password"で自動入力)
     gmail_user = st.text_input("送信元Gmail", value=def_user, placeholder="your_email@gmail.com")
-    gmail_name = st.text_input("送信元名", value="", placeholder="タスク管理Bot")
-    gmail_pass = st.text_input("アプリパスワード", value="", type="password")
+    gmail_name = st.text_input("送信元名", value=def_name_val, placeholder="タスク管理Bot")
+    gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password")
     
     st.markdown("---")
     target_email = st.text_input("送信先メール", placeholder="boss@company.com")
     
+    # 担当者リスト
     all_assignees = []
     if not st.session_state.tasks_df.empty:
         ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
@@ -218,7 +229,6 @@ with st.sidebar:
                     assignees = f"{r.get('担当者1','')} {r.get('担当者2','')} {r.get('担当者3','')}"
                     body += f"・{r['タイトル']}\n  期限:{r['期限']} / 担当:{assignees}\n  優先度:{r['優先度']} / 進捗:{r['進捗']}\n\n"
                 
-                # ★URLの追記
                 body += "-"*30 + "\n"
                 body += f"▼ アプリを開いて確認する\n{APP_URL}\n"
 
