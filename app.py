@@ -74,31 +74,24 @@ def save_data(df):
         client = get_gspread_client()
         sheet = client.open(SHEET_NAME).sheet1
         
-        # 保存用にコピー
         save_df = df.copy()
         
-        # 1. 「削除」列がある場合は消す
         if "削除" in save_df.columns:
             save_df = save_df.drop(columns=["削除"])
 
-        # 2. 日付を文字列化
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
-        # 3. 列の並び順をスプレッドシートの定義通りに強制整列させる
+        # 列の強制整列
         save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
         
-        # 4. 書き込み
         sheet.batch_clear(["A2:K1000"])
         data = save_df.values.tolist()
         if len(data) > 0:
             sheet.update(range_name='A2', values=data)
             
         set_validation(sheet)
-        
-        # ★保存成功時にキャッシュをクリアして、次回確実に最新データを読み込むようにする
-        st.cache_data.clear()
-        
+        st.cache_data.clear() # キャッシュクリア
         return True
     except Exception as e:
         st.error(f"保存エラー: {e}")
@@ -151,39 +144,51 @@ def ensure_date_columns(df):
 # --- UI構築 ---
 st.set_page_config(layout="wide", page_title="社内タスク管理システム", page_icon="📝")
 
-# --- セッション状態の初期化と「列ズレ」自動修復ロジック ---
-# 1. データフレームが存在しない場合はロード
+# データロード & 列チェック
 if 'tasks_df' not in st.session_state:
     st.session_state.tasks_df = ensure_date_columns(load_data())
 
-# 2. 【重要】現在のデータフレームの列構成が、最新の定義と合っているかチェック
 current_cols = set(st.session_state.tasks_df.columns)
 required_cols = set(["削除"] + SPREADSHEET_ORDER)
 
-# もし列が足りなかったり多かったりしたら（＝構成が変わっていたら）、強制リロード
 if current_cols != required_cols:
-    st.cache_data.clear() # キャッシュ削除
-    st.session_state.tasks_df = ensure_date_columns(load_data()) # 再読み込み
+    st.cache_data.clear()
+    st.session_state.tasks_df = ensure_date_columns(load_data())
 
 if 'editing_task' not in st.session_state: st.session_state.editing_task = None
 if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
-# リロード時再チェック
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# 通知ロジック
+# --- 通知ロジックの分離 ---
 today = datetime.date.today()
-df_alert = st.session_state.tasks_df.copy()
+df_base = st.session_state.tasks_df.copy()
+
+# A. 画面上部のアラート用 (条件: 未完了 AND (期限切れ OR 優先度高))
 try:
-    if '進捗' in df_alert.columns and '期限' in df_alert.columns:
-        due_ts = pd.to_datetime(df_alert['期限'], errors='coerce')
+    if '進捗' in df_base.columns and '期限' in df_base.columns:
+        due_ts = pd.to_datetime(df_base['期限'], errors='coerce')
         is_expired = due_ts < pd.Timestamp(today)
-        alert_rows = df_alert[(df_alert['進捗'] != '完了') & (is_expired | (df_alert['優先度'] == '高'))]
+        # 条件に合うものだけ抽出
+        alert_rows = df_base[(df_base['進捗'] != '完了') & (is_expired | (df_base['優先度'] == '高'))]
         alert_count = len(alert_rows)
     else:
         alert_count = 0
 except:
     alert_count = 0
+
+# B. メール送信用のリスト (条件: 未完了すべて)
+# ※優先度や期限に関わらず、未完了なら送れるようにする
+try:
+    if '進捗' in df_base.columns:
+        email_rows = df_base[df_base['進捗'] != '完了']
+        email_count = len(email_rows)
+    else:
+        email_rows = pd.DataFrame()
+        email_count = 0
+except:
+    email_count = 0
+
 
 col_t, col_a = st.columns([1, 2])
 with col_t: st.title("📝 社内タスク管理")
@@ -191,17 +196,14 @@ with col_a:
     if alert_count > 0:
         st.markdown(f"<h3 style='color:red'>⚠️ 未完了・期限切れ: {alert_count}件</h3>", unsafe_allow_html=True)
 
-# サイドバー (Gmail設定修正版)
+# サイドバー
 with st.sidebar:
     st.header("📧 通知設定")
     
-    # Secretsから初期値を取得
+    # 送信元GmailのみSecretsから取得（名前・パスワードは空欄）
     def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
     
-    # 1. 送信元Gmail: Secretsがあればそれを初期値に、なければ空欄
     gmail_user = st.text_input("送信元Gmail", value=def_user, placeholder="your_email@gmail.com")
-    
-    # 2. 送信元名 & パスワード: 常に空欄スタート（自由入力）
     gmail_name = st.text_input("送信元名", value="", placeholder="タスク管理Bot")
     gmail_pass = st.text_input("アプリパスワード", value="", type="password", help="16桁のGoogleアプリパスワード")
     
@@ -210,15 +212,21 @@ with st.sidebar:
     target_name = st.text_input("宛名 (〇〇様)")
     
     if st.button("📩 通知送信"):
-        if alert_count > 0 and gmail_user and gmail_pass and target_email:
+        # メール送信条件を緩和: email_count (全未完了) > 0 ならOK
+        if email_count > 0 and gmail_user and gmail_pass and target_email:
             body = f"{target_name}\n\n未完了タスクのお知らせです。\n\n"
-            for _, r in alert_rows.iterrows():
+            # メール本文には「未完了タスク全て」を載せる
+            for _, r in email_rows.iterrows():
                 assignees = f"{r.get('担当者1','')} {r.get('担当者2','')} {r.get('担当者3','')}"
                 body += f"・{r['タイトル']}\n  期限:{r['期限']} / 担当:{assignees}\n  優先度:{r['優先度']} / 進捗:{r['進捗']}\n\n"
-            if send_gmail("【タスク通知】未完了案件", body, target_email, target_name, gmail_user, gmail_name, gmail_pass):
-                st.success("送信しました")
+            
+            if send_gmail("【タスク通知】未完了案件一覧", body, target_email, target_name, gmail_user, gmail_name, gmail_pass):
+                st.success(f"{email_count}件のタスクを通知しました")
         else:
-            st.error("設定不足または対象タスクがありません")
+            if email_count == 0:
+                st.info("未完了のタスクはありません（全て完了済みです）")
+            else:
+                st.error("設定不足です。Gmail、パスワード、送信先を入力してください")
 
 # --- タスク登録フォーム ---
 with st.expander(f"**タスク登録 / 編集**", expanded=True):
@@ -301,11 +309,9 @@ if f_pri: df_view = df_view[df_view['優先度'].isin(f_pri)]
 if f_ass: df_view = df_view[df_view['担当者1'].isin(f_ass) | df_view['担当者2'].isin(f_ass) | df_view['担当者3'].isin(f_ass)]
 if f_key: df_view = df_view[df_view['タイトル'].str.contains(f_key, na=False)]
 
-# 分割
 df_active = df_view[df_view['進捗'] != '完了'].copy()
 df_completed = df_view[df_view['進捗'] == '完了'].copy()
 
-# カラム設定
 col_cfg = {
     "削除": st.column_config.CheckboxColumn(width="small", label="🗑️"),
     "期限": st.column_config.DateColumn(format="YYYY-MM-DD"),
@@ -314,7 +320,7 @@ col_cfg = {
     "進捗": st.column_config.SelectboxColumn(options=STATUS_OPTIONS)
 }
 
-# --- A. 未完了タスク ---
+# A. 未完了タスク
 st.subheader("🔥 未完了タスク")
 df_active = ensure_date_columns(df_active)
 active_cols = ["削除","タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
@@ -341,18 +347,16 @@ if st.button("🗑️ チェックした行を削除 (未完了)"):
     if len(idx)>0:
         st.session_state.tasks_df.drop(idx, inplace=True)
         st.session_state.tasks_df.reset_index(drop=True, inplace=True)
-        # 削除列のリセット（再構築ではなく値の初期化）
         if "削除" not in st.session_state.tasks_df.columns:
             st.session_state.tasks_df.insert(0, "削除", False)
         else:
             st.session_state.tasks_df["削除"] = False
-            
         save_data(st.session_state.tasks_df)
         st.rerun()
 
 st.markdown("---")
 
-# --- B. 完了済みタスク ---
+# B. 完了済みタスク
 st.subheader("✅ 完了済みタスク")
 df_completed = ensure_date_columns(df_completed)
 completed_cols = ["タイトル","詳細","依頼者","担当者1","担当者2","担当者3","優先度","進捗","期限","完了日","備考"]
