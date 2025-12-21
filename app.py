@@ -15,7 +15,7 @@ STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
 
 # ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
-APP_URL = "https://share.streamlit.io/your-app-url" 
+APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
 
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
@@ -398,3 +398,4 @@ with st.sidebar:
             st.success(f"✅ 接続成功！\nスプレッドシートが見つかりました。\nA1セルの値: {val}")
         except Exception as e:
             st.error(f"❌ 接続失敗\n原因: {e}")
+
