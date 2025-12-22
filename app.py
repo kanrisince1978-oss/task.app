@@ -13,8 +13,9 @@ from oauth2client.service_account import ServiceAccountCredentials
 PRIORITY_OPTIONS = ["高", "中", "低"]
 STATUS_OPTIONS = ["未対応", "進行中", "完了"]
 SHEET_NAME = "task_db"
+LOG_SHEET_NAME = "deleted_tasks" # 削除履歴用のシート名
 
-# ★ここにあなたのアプリのURLを貼り付けてください（メールの末尾に記載されます）
+# ★ここにあなたのアプリのURLを貼り付けてください
 APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
 
 # スプレッドシートの列順序定義
@@ -79,14 +80,12 @@ def save_data(df):
         
         save_df = df.copy()
         
-        # アプリ専用列（通知・削除）はスプレッドシートに保存しない
         if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
         if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
 
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
         
-        # 強制整列
         save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
         
         sheet.batch_clear(["A2:K1000"])
@@ -95,11 +94,59 @@ def save_data(df):
             sheet.update(range_name='A2', values=data)
             
         set_validation(sheet)
-        st.cache_data.clear() # キャッシュクリア
+        st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"保存エラー: {e}")
         return False
+
+# ★削除ログ保存用の新機能
+def save_deleted_log(deleted_df):
+    try:
+        client = get_gspread_client()
+        # 履歴用シートを開く（名前注意：deleted_tasks）
+        try:
+            log_sheet = client.open(SHEET_NAME).worksheet(LOG_SHEET_NAME)
+        except:
+            st.error(f"エラー: スプレッドシートに '{LOG_SHEET_NAME}' という名前のシートが見つかりません。作成してください。")
+            return False
+
+        save_df = deleted_df.copy()
+        
+        # 不要な列を削除
+        if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
+        if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
+        
+        # 日付整形
+        for c in ['期限', '完了日']:
+            save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
+            
+        save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
+        
+        # 削除日を追加（先頭に）
+        save_df.insert(0, "削除日時", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        data = save_df.values.tolist()
+        if len(data) > 0:
+            log_sheet.append_rows(data)
+        return True
+    except Exception as e:
+        st.error(f"履歴保存エラー: {e}")
+        return False
+
+# ★削除履歴の読み込み機能
+def load_deleted_log():
+    try:
+        client = get_gspread_client()
+        try:
+            log_sheet = client.open(SHEET_NAME).worksheet(LOG_SHEET_NAME)
+        except:
+            return pd.DataFrame()
+            
+        data = log_sheet.get_all_records()
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
 
 def set_validation(sheet):
     requests = [
@@ -161,7 +208,7 @@ if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# 通知ロジック（画面アラート用）
+# 通知ロジック
 today = datetime.date.today()
 df_base = st.session_state.tasks_df.copy()
 
@@ -186,12 +233,10 @@ with col_a:
 with st.sidebar:
     st.header("📧 通知設定")
     
-    # Secretsから情報取得
     def_user = st.secrets["gmail"]["user_email"] if "gmail" in st.secrets else ""
     def_pass = st.secrets["gmail"]["app_password"] if "gmail" in st.secrets else ""
     def_name_val = st.secrets["gmail"]["user_name"] if "gmail" in st.secrets else "タスク管理Bot"
 
-    # 固定表示（編集不可）
     gmail_user = st.text_input("送信元Gmail", value=def_user, disabled=True, help="Secretsの設定値が使用されます")
     gmail_name = st.text_input("送信元名", value=def_name_val, placeholder="タスク管理Bot")
     gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password", disabled=True, help="Secretsの設定値が使用されます")
@@ -199,7 +244,6 @@ with st.sidebar:
     st.markdown("---")
     target_email = st.text_input("送信先メール", placeholder="boss@company.com")
     
-    # 担当者リスト
     all_assignees = []
     if not st.session_state.tasks_df.empty:
         ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
@@ -346,23 +390,30 @@ if st.session_state.act.get("edited_rows"):
     st.rerun()
 
 if st.button("🗑️ チェックした行を削除 (未完了)"):
-    idx = st.session_state.tasks_df[st.session_state.tasks_df['削除']].index
-    if len(idx)>0:
-        st.session_state.tasks_df.drop(idx, inplace=True)
-        st.session_state.tasks_df.reset_index(drop=True, inplace=True)
-        
-        if "削除" not in st.session_state.tasks_df.columns:
-            st.session_state.tasks_df.insert(1, "削除", False)
-        else:
-            st.session_state.tasks_df["削除"] = False
+    # 削除対象を取得
+    del_mask = st.session_state.tasks_df['削除']
+    del_rows = st.session_state.tasks_df[del_mask]
+    
+    if not del_rows.empty:
+        # ★履歴シートへ保存
+        if save_deleted_log(del_rows):
+            # メインから削除
+            idx = del_rows.index
+            st.session_state.tasks_df.drop(idx, inplace=True)
+            st.session_state.tasks_df.reset_index(drop=True, inplace=True)
             
-        if "通知" not in st.session_state.tasks_df.columns:
-            st.session_state.tasks_df.insert(0, "通知", False)
-        else:
+            # 列の再構築（バグ防止）
+            if "削除" not in st.session_state.tasks_df.columns:
+                st.session_state.tasks_df.insert(1, "削除", False)
+            if "通知" not in st.session_state.tasks_df.columns:
+                st.session_state.tasks_df.insert(0, "通知", False)
+                
+            st.session_state.tasks_df["削除"] = False
             st.session_state.tasks_df["通知"] = False
 
-        save_data(st.session_state.tasks_df)
-        st.rerun()
+            save_data(st.session_state.tasks_df)
+            st.success(f"{len(del_rows)}件のタスクを削除し、履歴に保存しました。")
+            st.rerun()
 
 st.markdown("---")
 
@@ -387,7 +438,19 @@ if st.session_state.comp.get("edited_rows"):
     save_data(st.session_state.tasks_df)
     st.rerun()
 
-# --- 接続テスト用ボタン (サイドバーの一番下に追加) ---
+# --- 削除履歴の表示エリア ---
+st.markdown("---")
+with st.expander("🗑️ 削除履歴 (過去に削除されたタスク)"):
+    if st.button("履歴を更新"):
+        st.cache_data.clear()
+        
+    df_log = load_deleted_log()
+    if not df_log.empty:
+        st.dataframe(df_log)
+    else:
+        st.info("削除された履歴はありません。")
+
+# --- 接続テスト用ボタン (サイドバーの一番下) ---
 with st.sidebar:
     st.markdown("---")
     if st.button("🔧 接続テスト"):
@@ -398,4 +461,3 @@ with st.sidebar:
             st.success(f"✅ 接続成功！\nスプレッドシートが見つかりました。\nA1セルの値: {val}")
         except Exception as e:
             st.error(f"❌ 接続失敗\n原因: {e}")
-
