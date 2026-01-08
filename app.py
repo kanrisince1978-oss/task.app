@@ -18,6 +18,14 @@ LOG_SHEET_NAME = "deleted_tasks" # 削除履歴用のシート名
 # ★ここにあなたのアプリのURLを貼り付けてください
 APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
 
+# ★ここに「名前」と「メールアドレス」の対応表を作ってください
+# 左側にスプレッドシート上の名前、右側にメールアドレスを書きます
+USER_DIRECTORY = {
+    "田村 洸樹": "kanri.since1978@gmail.com",
+    "兵頭 照得": "t.hyodo.zeimu@gmail.com",
+    # ↑ここを書き換えてください
+}
+
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
     "タイトル", "詳細", "依頼者", 
@@ -100,11 +108,10 @@ def save_data(df):
         st.error(f"保存エラー: {e}")
         return False
 
-# ★削除ログ保存用の新機能
+# 削除ログ保存用
 def save_deleted_log(deleted_df):
     try:
         client = get_gspread_client()
-        # 履歴用シートを開く（名前注意：deleted_tasks）
         try:
             log_sheet = client.open(SHEET_NAME).worksheet(LOG_SHEET_NAME)
         except:
@@ -113,17 +120,13 @@ def save_deleted_log(deleted_df):
 
         save_df = deleted_df.copy()
         
-        # 不要な列を削除
         if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
         if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
         
-        # 日付整形
         for c in ['期限', '完了日']:
             save_df[c] = save_df[c].apply(lambda x: x.strftime('%Y-%m-%d') if x is not None and pd.notnull(x) else "")
             
         save_df = save_df.reindex(columns=SPREADSHEET_ORDER)
-        
-        # 削除日を追加（先頭に）
         save_df.insert(0, "削除日時", datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
         data = save_df.values.tolist()
@@ -134,7 +137,6 @@ def save_deleted_log(deleted_df):
         st.error(f"履歴保存エラー: {e}")
         return False
 
-# ★削除履歴の読み込み機能
 def load_deleted_log():
     try:
         client = get_gspread_client()
@@ -142,7 +144,6 @@ def load_deleted_log():
             log_sheet = client.open(SHEET_NAME).worksheet(LOG_SHEET_NAME)
         except:
             return pd.DataFrame()
-            
         data = log_sheet.get_all_records()
         return pd.DataFrame(data)
     except:
@@ -208,7 +209,6 @@ if 'edit_index' not in st.session_state: st.session_state.edit_index = None
 
 st.session_state.tasks_df = ensure_date_columns(st.session_state.tasks_df)
 
-# 通知ロジック
 today = datetime.date.today()
 df_base = st.session_state.tasks_df.copy()
 
@@ -242,8 +242,8 @@ with st.sidebar:
     gmail_pass = st.text_input("アプリパスワード", value=def_pass, type="password", disabled=True, help="Secretsの設定値が使用されます")
     
     st.markdown("---")
-    target_email = st.text_input("送信先メール", placeholder="boss@company.com")
     
+    # 担当者リストの作成（シートにある名前 + 登録簿の名前）
     all_assignees = []
     if not st.session_state.tasks_df.empty:
         ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
@@ -252,7 +252,18 @@ with st.sidebar:
             unique_ass = pd.unique(raw_ass)
             all_assignees = [x for x in unique_ass if x and x.lower() != "nan" and x.lower() != "none"]
     
+    # 登録簿にある名前も選択肢に追加
+    for name in USER_DIRECTORY.keys():
+        if name not in all_assignees:
+            all_assignees.append(name)
+            
+    # ★変更点：名前を選択すると、アドレスを自動取得
     target_name = st.selectbox("宛名 (担当者を選択)", options=[""] + sorted(all_assignees))
+    
+    # 名前からメールアドレスを引く（なければ空欄）
+    auto_email = USER_DIRECTORY.get(target_name, "")
+    
+    target_email = st.text_input("送信先メール", value=auto_email, placeholder="boss@company.com")
     
     if st.button("📩 通知送信"):
         if gmail_user and gmail_pass and target_email and target_name:
@@ -390,19 +401,15 @@ if st.session_state.act.get("edited_rows"):
     st.rerun()
 
 if st.button("🗑️ チェックした行を削除 (未完了)"):
-    # 削除対象を取得
     del_mask = st.session_state.tasks_df['削除']
     del_rows = st.session_state.tasks_df[del_mask]
     
     if not del_rows.empty:
-        # ★履歴シートへ保存
         if save_deleted_log(del_rows):
-            # メインから削除
             idx = del_rows.index
             st.session_state.tasks_df.drop(idx, inplace=True)
             st.session_state.tasks_df.reset_index(drop=True, inplace=True)
             
-            # 列の再構築（バグ防止）
             if "削除" not in st.session_state.tasks_df.columns:
                 st.session_state.tasks_df.insert(1, "削除", False)
             if "通知" not in st.session_state.tasks_df.columns:
