@@ -19,12 +19,15 @@ LOG_SHEET_NAME = "deleted_tasks" # 削除履歴用のシート名
 APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/" 
 
 # ★ここに「名前」と「メールアドレス」の対応表を作ってください
-# 左側にスプレッドシート上の名前、右側にメールアドレスを書きます
+# ※これが選択肢のマスターデータになります
 USER_DIRECTORY = {
     "田村 洸樹": "kanri.since1978@gmail.com",
     "兵頭 照得": "t.hyodo.zeimu@gmail.com",
-    # ↑ここを書き換えてください
+    # 必要な人数分だけ追加してください
 }
+
+# 選択肢リスト（空欄 + 名簿の名前）
+USER_LIST = [""] + list(USER_DIRECTORY.keys())
 
 # スプレッドシートの列順序定義
 SPREADSHEET_ORDER = [
@@ -52,15 +55,12 @@ def load_data():
         if df.empty:
             df = pd.DataFrame(columns=SPREADSHEET_ORDER)
 
-        # 必須カラム確保
         for c in SPREADSHEET_ORDER:
             if c not in df.columns: df[c] = ""
 
-        # 不要な列削除
         if "削除" in df.columns: df = df.drop(columns=["削除"])
         if "通知" in df.columns: df = df.drop(columns=["通知"])
             
-        # アプリ操作用列の追加
         df.insert(0, "通知", False)
         df.insert(1, "削除", False)
 
@@ -108,7 +108,6 @@ def save_data(df):
         st.error(f"保存エラー: {e}")
         return False
 
-# 削除ログ保存用
 def save_deleted_log(deleted_df):
     try:
         client = get_gspread_client()
@@ -119,7 +118,6 @@ def save_deleted_log(deleted_df):
             return False
 
         save_df = deleted_df.copy()
-        
         if "通知" in save_df.columns: save_df = save_df.drop(columns=["通知"])
         if "削除" in save_df.columns: save_df = save_df.drop(columns=["削除"])
         
@@ -243,26 +241,12 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 担当者リストの作成（シートにある名前 + 登録簿の名前）
-    all_assignees = []
-    if not st.session_state.tasks_df.empty:
-        ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
-        if ass_cols:
-            raw_ass = st.session_state.tasks_df[ass_cols].astype(str).values.ravel('K')
-            unique_ass = pd.unique(raw_ass)
-            all_assignees = [x for x in unique_ass if x and x.lower() != "nan" and x.lower() != "none"]
+    # ★変更点：選択肢は「名簿(USER_DIRECTORY)」のみにする（過去のゴミデータを表示させない）
+    # sortedで五十音順など並び替え
+    target_name = st.selectbox("宛名 (担当者を選択)", options=sorted(USER_LIST))
     
-    # 登録簿にある名前も選択肢に追加
-    for name in USER_DIRECTORY.keys():
-        if name not in all_assignees:
-            all_assignees.append(name)
-            
-    # ★変更点：名前を選択すると、アドレスを自動取得
-    target_name = st.selectbox("宛名 (担当者を選択)", options=[""] + sorted(all_assignees))
-    
-    # 名前からメールアドレスを引く（なければ空欄）
+    # 名前からメールアドレスを自動入力
     auto_email = USER_DIRECTORY.get(target_name, "")
-    
     target_email = st.text_input("送信先メール", value=auto_email, placeholder="boss@company.com")
     
     if st.button("📩 通知送信"):
@@ -291,6 +275,7 @@ with st.sidebar:
                     st.success(f"{target_name}様のタスク {email_count}件を送信しました")
             else:
                 st.warning(f"「{target_name}」様のタスクで、通知チェック(✉️)が入った未完了タスクがありません。")
+                st.info("※名前が名簿と完全に一致していないタスクは検出されません。表記が異なる場合はタスクを編集してください。")
         else:
             st.error("設定不足です。アドレス、パスワード、宛先（担当者）を選択してください")
 
@@ -299,17 +284,32 @@ with st.expander(f"**タスク登録 / 編集**", expanded=True):
     task = st.session_state.editing_task if st.session_state.editing_task else {}
     c1, c2 = st.columns(2)
     
+    # 選択ボックスのデフォルト値を決める関数
+    def get_index(val, options):
+        return options.index(val) if val in options else 0
+
     with c1:
         title = st.text_input("①タイトル", value=task.get("タイトル", ""))
         details = st.text_area("②詳細", value=task.get("詳細", ""), height=100)
+        
+        # ★変更点：依頼者を選択式に
         last_req = st.session_state.tasks_df["依頼者"].iloc[-1] if not st.session_state.tasks_df.empty else ""
-        requester = st.text_input("③依頼者", value=task.get("依頼者", last_req))
+        # もし前回の依頼者が名簿になければ空欄にする
+        if last_req not in USER_DIRECTORY: last_req = ""
+        current_req = task.get("依頼者", last_req)
+        requester = st.selectbox("③依頼者", options=USER_LIST, index=get_index(current_req, USER_LIST))
         
         st.write("④担当者")
         ac1, ac2, ac3 = st.columns(3)
-        as1 = ac1.text_input("担当1", task.get("担当者1",""), label_visibility="collapsed", placeholder="担当1")
-        as2 = ac2.text_input("担当2", task.get("担当者2",""), label_visibility="collapsed", placeholder="担当2")
-        as3 = ac3.text_input("担当3", task.get("担当者3",""), label_visibility="collapsed", placeholder="担当3")
+        
+        # ★変更点：担当者を選択式に
+        as1_val = task.get("担当者1", "")
+        as2_val = task.get("担当者2", "")
+        as3_val = task.get("担当者3", "")
+
+        as1 = ac1.selectbox("担当1", options=USER_LIST, index=get_index(as1_val, USER_LIST), label_visibility="collapsed")
+        as2 = ac2.selectbox("担当2", options=USER_LIST, index=get_index(as2_val, USER_LIST), label_visibility="collapsed")
+        as3 = ac3.selectbox("担当3", options=USER_LIST, index=get_index(as3_val, USER_LIST), label_visibility="collapsed")
 
     with c2:
         priority = st.selectbox("⑤優先度", PRIORITY_OPTIONS, index=PRIORITY_OPTIONS.index(task.get("優先度", "高")))
@@ -358,7 +358,18 @@ st.markdown("---")
 with st.expander("🔎 フィルター"):
     fc1, fc2, fc3 = st.columns(3)
     f_pri = fc1.multiselect("優先度", PRIORITY_OPTIONS)
-    f_ass = fc2.multiselect("担当者", all_assignees)
+    
+    # フィルターの選択肢も名簿ベースにする？（今は全データの値から抽出）
+    # ひとまず「データにある名前」を優先して表示
+    all_assignees_filter = []
+    if not st.session_state.tasks_df.empty:
+        ass_cols = [c for c in ['担当者1','担当者2','担当者3'] if c in st.session_state.tasks_df.columns]
+        if ass_cols:
+            raw_ass = st.session_state.tasks_df[ass_cols].astype(str).values.ravel('K')
+            unique_ass = pd.unique(raw_ass)
+            all_assignees_filter = [x for x in unique_ass if x and x.lower() != "nan" and x.lower() != "none"]
+            
+    f_ass = fc2.multiselect("担当者", sorted(all_assignees_filter))
     f_key = fc3.text_input("検索")
 
 df_view = st.session_state.tasks_df.copy()
