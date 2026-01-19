@@ -23,6 +23,8 @@ APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/"
 USER_DIRECTORY = {
     "田村 洸樹": "kanri.since1978@gmail.com",
     "兵頭 照得": "t.hyodo.zeimu@gmail.com",
+    "高橋 剛": "t.takahashi@onegrjp.com",
+    "宮本 優斗": "y.miyamoto@onegrjp.com",
     # 必要な人数分だけ追加してください
 }
 
@@ -479,3 +481,4 @@ with st.sidebar:
             st.success(f"✅ 接続成功！\nスプレッドシートが見つかりました。\nA1セルの値: {val}")
         except Exception as e:
             st.error(f"❌ 接続失敗\n原因: {e}")
+
