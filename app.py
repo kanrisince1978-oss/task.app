@@ -21,7 +21,7 @@ APP_URL = "https://taskapp-vjdepqj8lk3fmd5sy9amsx.streamlit.app/"
 # ★ここに「名前」と「メールアドレス」の対応表を作ってください
 # ※これが選択肢のマスターデータになります
 USER_DIRECTORY = {
-    "田村 洸樹": "kanri.since1978@gmail.com",
+    "田村 洸樹": "k.tamura@onegrjp.com",
     "兵頭 照得": "t.hyodo.zeimu@gmail.com",
     "高橋 剛": "t.takahashi@onegrjp.com",
     "宮本 優斗": "y.miyamoto@onegrjp.com",
@@ -481,4 +481,5 @@ with st.sidebar:
             st.success(f"✅ 接続成功！\nスプレッドシートが見つかりました。\nA1セルの値: {val}")
         except Exception as e:
             st.error(f"❌ 接続失敗\n原因: {e}")
+
 
